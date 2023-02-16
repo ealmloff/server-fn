@@ -63,9 +63,9 @@ macro_rules! maybe_path {
 
 #[macro_export]
 macro_rules! server_fn {
-    ($(@$path:literal)? $vis:vis async fn $name:ident($($args:ty)*) $(-> Result<$ret:ty, RemoteCallError>)? $body:block) => {
+    ($(@$path:literal)? $vis:vis async fn $name:ident($( $args:ident : $t:ty ),* $(,)?) $(-> Result<$ret:ty, RemoteCallError>)? { $($body:tt)* }) => {
         #[cfg(any(feature = "server", doc))]
-        $vis async fn $name($($args)*) $(-> Result<$ret, $crate::RemoteCallError>)? {
+        $vis async fn $name($($args : $t),*) $(-> Result<$ret, $crate::RemoteCallError>)? {
             const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
             pub fn from_to_serde(input: &[u8]) -> $crate::SerdeFunctionWrapperReturn {
                 let deserialized = $crate::ciborium::de::from_reader(input);
@@ -86,15 +86,15 @@ macro_rules! server_fn {
                 }
             }
 
-            async fn inner($($args)*) $(-> Result<$ret, $crate::RemoteCallError>)? {
-                $body
+            async fn inner($($args : $t),*) $(-> Result<$ret, $crate::RemoteCallError>)? {
+                $($body)*
             }
 
-            inner($($args$(;)?)*).await
+            inner($($args),*).await
         }
 
         #[cfg(feature = "client")]
-        $vis async fn $name($($args)*) $(-> Result<$ret, $crate::RemoteCallError>)? {
+        $vis async fn $name($($args : $t),*) $(-> Result<$ret, $crate::RemoteCallError>)? {
             const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
             $crate::fetch(($($args),*), ID, stringify!($name), $crate::maybe_path!($($path)?)).await
         }
