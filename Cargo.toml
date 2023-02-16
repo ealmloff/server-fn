@@ -1,0 +1,26 @@
+[package]
+name = "server-fn"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.6.6", optional = true }
+ciborium = "0.2.0"
+ciborium-io = "0.2.0"
+serde = { version = "1.0.7", features = ["derive"] }
+xxhash-rust = { version = "0.8.6", features = ["const_xxh64"] }
+once_cell = "1.17.1"
+log = "0.4.17"
+reqwest = { version = "0.11.14", optional = true }
+inventory = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3.61", features = ["Document", "Window", "Location"] }
+
+[features]
+default = []
+axum = ["dep:axum", "server"]
+server = ["inventory"]
+client = ["reqwest"]
