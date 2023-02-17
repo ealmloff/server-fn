@@ -5,15 +5,20 @@ pub use ciborium;
 #[cfg(feature = "server")]
 #[doc(hidden)]
 pub use inventory;
-use once_cell::sync::OnceCell;
-use serde::{de::DeserializeOwned, Serialize};
 #[doc(hidden)]
 pub use xxhash_rust;
+
+use once_cell::sync::OnceCell;
+use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "axum")]
 mod axum;
 #[cfg(feature = "axum")]
 pub use crate::axum::*;
+#[cfg(feature = "actix-web")]
+mod actix_web;
+#[cfg(feature = "actix-web")]
+pub use crate::actix_web::*;
 
 static ROOT_URL: OnceCell<&'static str> = OnceCell::new();
 
