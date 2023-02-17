@@ -7,6 +7,10 @@ pub use ciborium;
 pub use inventory;
 #[doc(hidden)]
 pub use xxhash_rust;
+#[doc(hidden)]
+pub use paste;
+#[doc(hidden)]
+pub use const_format;
 
 use once_cell::sync::OnceCell;
 use serde::{de::DeserializeOwned, Serialize};
@@ -60,39 +64,40 @@ pub fn server_fns() -> impl Iterator<Item = &'static ServerFn> {
 #[macro_export]
 macro_rules! server_fn {
     ($(@$path:literal)? $({$e:ty})? $vis:vis async fn $name:ident($( $args:ident : $t:ty ),* $(,)?) -> Result<$ret:ty, RemoteCallError> { $($body:tt)* }) => {
-        #[cfg(any(feature = "server", doc))]
-        $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
-            const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
-            pub fn from_to_serde(input: &[u8]) -> $crate::SerdeFunctionWrapperReturn {
-                type _E = $crate::server_fn!(#maybe_encoding $($e)?);
-                let deserialized = _E::decode(input);
-                Box::pin(async move {
-                    let ($($args),*) = deserialized?;
-                    _E::encode(&inner($($args),*).await?)
-                })
-            }
-
-            $crate::inventory::submit! {
-                $crate::ServerFn {
-                    id: ID,
-                    fn_name: stringify!($name),
-                    path: $crate::server_fn!(#maybe_path $($path)?),
-                    func: from_to_serde,
+        $crate::paste::paste! {
+            const [<$name _HASH>]: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
+            const [<$name _PATH>]: &str = $crate::const_format::concatcp!($crate::server_fn!(#maybe_path $($path)?), "/", stringify!($name), [<$name _HASH>]);
+            type [<$name _ENCODING>] = $crate::server_fn!(#maybe_encoding $($e)?);
+            #[cfg(any(feature = "server", doc))]
+            $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
+                pub fn from_to_serde(input: &[u8]) -> $crate::SerdeFunctionWrapperReturn {
+                    let deserialized = [<$name _ENCODING>]::decode(input);
+                    Box::pin(async move {
+                        let ($($args),*) = deserialized?;
+                        [<$name _ENCODING>]::encode(&inner($($args),*).await?)
+                    })
                 }
+    
+                $crate::inventory::submit! {
+                    $crate::ServerFn {
+                        id: [<$name _HASH>],
+                        fn_name: stringify!($name),
+                        path: [<$name _PATH>],
+                        func: from_to_serde,
+                    }
+                }
+    
+                async fn inner($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
+                    $($body)*
+                }
+    
+                inner($($args),*).await
             }
-
-            async fn inner($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
-                $($body)*
+    
+            #[cfg(feature = "client")]
+            $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
+                $crate::fetch::<[<$name _ENCODING>], _, _>(($($args),*), [<$name _PATH>]).await
             }
-
-            inner($($args),*).await
-        }
-
-        #[cfg(feature = "client")]
-        $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
-            type _E = $crate::server_fn!(#maybe_encoding $($e)?);
-            const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
-            $crate::fetch::<_E, _, _>(($($args),*), ID, stringify!($name), $crate::server_fn!(#maybe_path $($path)?)).await
         }
     };
     (#maybe_path $path:literal) => {
@@ -116,15 +121,13 @@ pub async fn fetch<
     R: serde::de::DeserializeOwned,
 >(
     data: I,
-    id: u64,
-    fn_name: &str,
     path: &str,
 ) -> Result<R, RemoteCallError> {
     let client = reqwest::Client::new();
     let root = get_root_url();
-    let mut serialized: Vec<u8> = E::encode(&data)?;
+    let serialized: Vec<u8> = E::encode(&data)?;
     let res = client
-        .post(format!("{root}{path}/{fn_name}{id}"))
+        .post(&format!("{root}{path}"))
         .header("Content-Type", E::CONTENT_TYPE)
         .body(serialized)
         .send()
@@ -142,19 +145,6 @@ pub struct ServerFn {
     pub fn_name: &'static str,
     pub path: &'static str,
     pub func: SerdeFunctionWrapper,
-}
-
-impl ServerFn {
-    #[cfg(feature = "server")]
-    fn route(&self) -> String {
-        let Self {
-            id,
-            fn_name,
-            path,
-            func: _,
-        } = self;
-        format!("{path}/{fn_name}{id}",)
-    }
 }
 
 impl Debug for ServerFn {

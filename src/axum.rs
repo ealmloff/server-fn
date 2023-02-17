@@ -10,8 +10,9 @@ impl RouterExt for Router {
     fn register_server_fns(self) -> Self {
         let mut router = self;
         for server_fn in crate::server_fns() {
-            let route = server_fn.route();
+            let route = server_fn.path;
             let func = server_fn.func;
+            println!("Registering route: {:?}", server_fn);
             router = router.route(&route, post(move |body| call_inner(body, func)));
         }
         router

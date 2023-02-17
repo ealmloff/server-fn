@@ -15,7 +15,7 @@ impl<T: ServiceFactory<ServiceRequest, Config = (), Error = Error, InitError = (
     fn register_server_fns(self) -> Self {
         let mut app = self;
         for server_fn in crate::server_fns() {
-            let route = server_fn.route();
+            let route = server_fn.path;
             let func = server_fn.func;
             app = app.route(&route, web::post().to(move |body| call_inner(body, func)));
         }
