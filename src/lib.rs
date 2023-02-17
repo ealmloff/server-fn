@@ -6,6 +6,7 @@ pub use ciborium;
 #[doc(hidden)]
 pub use inventory;
 use once_cell::sync::OnceCell;
+use serde::{de::DeserializeOwned, Serialize};
 #[doc(hidden)]
 pub use xxhash_rust;
 
@@ -52,28 +53,17 @@ pub fn server_fns() -> impl Iterator<Item = &'static ServerFn> {
 }
 
 #[macro_export]
-macro_rules! maybe_path {
-    ($path:literal) => {
-        $path
-    };
-    () => {
-        "/api"
-    };
-}
-
-#[macro_export]
 macro_rules! server_fn {
-    ($(@$path:literal)? $vis:vis async fn $name:ident($( $args:ident : $t:ty ),* $(,)?) -> Result<$ret:ty, RemoteCallError> { $($body:tt)* }) => {
+    ($(@$path:literal)? $({$e:ty})? $vis:vis async fn $name:ident($( $args:ident : $t:ty ),* $(,)?) -> Result<$ret:ty, RemoteCallError> { $($body:tt)* }) => {
         #[cfg(any(feature = "server", doc))]
         $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
             const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
             pub fn from_to_serde(input: &[u8]) -> $crate::SerdeFunctionWrapperReturn {
-                let deserialized = $crate::ciborium::de::from_reader(input);
+                type _E = $crate::server_fn!(#maybe_encoding $($e)?);
+                let deserialized = _E::decode(input);
                 Box::pin(async move {
                     let ($($args),*) = deserialized?;
-                    let mut out: Vec<u8> = Vec::new();
-                    $crate::ciborium::ser::into_writer(&inner($($args),*).await?, &mut out)?;
-                    Ok(out)
+                    _E::encode(&inner($($args),*).await?)
                 })
             }
 
@@ -81,7 +71,7 @@ macro_rules! server_fn {
                 $crate::ServerFn {
                     id: ID,
                     fn_name: stringify!($name),
-                    path: $crate::maybe_path!($($path)?),
+                    path: $crate::server_fn!(#maybe_path $($path)?),
                     func: from_to_serde,
                 }
             }
@@ -95,14 +85,31 @@ macro_rules! server_fn {
 
         #[cfg(feature = "client")]
         $vis async fn $name($($args : $t),*) -> Result<$ret, $crate::RemoteCallError> {
+            type _E = $crate::server_fn!(#maybe_encoding $($e)?);
             const ID: u64 = $crate::xxhash_rust::const_xxh64::xxh64(concat!(env!("CARGO_MANIFEST_DIR"), ":", file!(), ":", line!(), ":", column!()).as_bytes(), 0);
-            $crate::fetch(($($args),*), ID, stringify!($name), $crate::maybe_path!($($path)?)).await
+            $crate::fetch::<_E, _, _>(($($args),*), ID, stringify!($name), $crate::server_fn!(#maybe_path $($path)?)).await
         }
+    };
+    (#maybe_path $path:literal) => {
+        $path
+    };
+    (#maybe_path) => {
+        "/api"
+    };
+    (#maybe_encoding $encoding:ty) => {
+        $encoding
+    };
+    (#maybe_encoding) => {
+        $crate::Cbor
     };
 }
 
 #[cfg(feature = "client")]
-pub async fn fetch<I: serde::ser::Serialize, R: serde::de::DeserializeOwned>(
+pub async fn fetch<
+    E: ServerFnEncoding,
+    I: serde::ser::Serialize,
+    R: serde::de::DeserializeOwned,
+>(
     data: I,
     id: u64,
     fn_name: &str,
@@ -110,16 +117,15 @@ pub async fn fetch<I: serde::ser::Serialize, R: serde::de::DeserializeOwned>(
 ) -> Result<R, RemoteCallError> {
     let client = reqwest::Client::new();
     let root = get_root_url();
-    let mut serialized: Vec<u8> = Vec::new();
-    ciborium::ser::into_writer(&data, &mut serialized)?;
+    let mut serialized: Vec<u8> = E::encode(&data)?;
     let res = client
         .post(format!("{root}{path}/{fn_name}{id}"))
-        .header("Content-Type", "application/cbor")
+        .header("Content-Type", E::CONTENT_TYPE)
         .body(serialized)
         .send()
         .await?;
     let bytes = res.bytes().await?;
-    let deserialized = ciborium::de::from_reader(&*bytes)?;
+    let deserialized = E::decode(&bytes)?;
     Ok(deserialized)
 }
 
@@ -163,24 +169,12 @@ pub type SerdeFunctionWrapperReturn =
 
 #[derive(Debug)]
 pub enum RemoteCallError {
-    CiboriumSerilization(ciborium::ser::Error<<&'static [u8] as ciborium_io::Read>::Error>),
-    CiboriumDeserilization(ciborium::de::Error<<Vec<u8> as ciborium_io::Write>::Error>),
+    Serilization(String),
+    Deserilization(String),
     #[cfg(feature = "client")]
     Reqwest(reqwest::Error),
     #[cfg(feature = "server")]
     Reqwest(()),
-}
-
-impl From<ciborium::ser::Error<<&'static [u8] as ciborium_io::Read>::Error>> for RemoteCallError {
-    fn from(e: ciborium::ser::Error<<&'static [u8] as ciborium_io::Read>::Error>) -> Self {
-        RemoteCallError::CiboriumSerilization(e)
-    }
-}
-
-impl From<ciborium::de::Error<<Vec<u8> as ciborium_io::Write>::Error>> for RemoteCallError {
-    fn from(e: ciborium::de::Error<<Vec<u8> as ciborium_io::Write>::Error>) -> Self {
-        RemoteCallError::CiboriumDeserilization(e)
-    }
 }
 
 #[cfg(feature = "client")]
@@ -192,3 +186,40 @@ impl From<reqwest::Error> for RemoteCallError {
 
 #[cfg(all(feature = "server", feature = "client"))]
 compile_error!("feature \"server\" and feature \"client\" cannot be enabled at the same time");
+
+pub trait ServerFnEncoding {
+    const CONTENT_TYPE: &'static str;
+    fn encode<T: Serialize>(data: T) -> Result<Vec<u8>, RemoteCallError>;
+    fn decode<T: DeserializeOwned>(input: &[u8]) -> Result<T, RemoteCallError>;
+}
+
+pub struct Cbor;
+
+impl ServerFnEncoding for Cbor {
+    const CONTENT_TYPE: &'static str = "application/cbor";
+
+    fn encode<T: Serialize>(data: T) -> Result<Vec<u8>, RemoteCallError> {
+        let mut out: Vec<u8> = Vec::new();
+        ciborium::ser::into_writer(&data, &mut out).unwrap();
+        Ok(out)
+    }
+
+    fn decode<T: DeserializeOwned>(input: &[u8]) -> Result<T, RemoteCallError> {
+        ciborium::de::from_reader(input)
+            .map_err(|e| RemoteCallError::Deserilization(format!("{e:?}")))
+    }
+}
+
+pub struct Json;
+
+impl ServerFnEncoding for Json {
+    const CONTENT_TYPE: &'static str = "application/json";
+
+    fn encode<T: Serialize>(data: T) -> Result<Vec<u8>, RemoteCallError> {
+        serde_json::to_vec(&data).map_err(|e| RemoteCallError::Serilization(format!("{e:?}")))
+    }
+
+    fn decode<T: DeserializeOwned>(input: &[u8]) -> Result<T, RemoteCallError> {
+        serde_json::from_slice(input).map_err(|e| RemoteCallError::Deserilization(format!("{e:?}")))
+    }
+}
